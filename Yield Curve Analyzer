@@ -1,0 +1,329 @@
+import pandas as pd
+import pandas_datareader.data as web
+from datetime import datetime, timedelta
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from typing import Dict, List, Tuple, Optional
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class USYieldCurveAnalyzer:
+    TREASURY_SERIES = {
+        '1M': 'DGS1MO',
+        '3M': 'DGS3MO', 
+        '6M': 'DGS6MO',
+        '1Y': 'DGS1',
+        '2Y': 'DGS2',
+        '3Y': 'DGS3',
+        '5Y': 'DGS5',
+        '7Y': 'DGS7',
+        '10Y': 'DGS10',
+        '20Y': 'DGS20',
+        '30Y': 'DGS30'
+    }
+
+    MATURITY_YEARS = {
+        '1M': 1/12,
+        '3M': 3/12,
+        '6M': 6/12,
+        '1Y': 1,
+        '2Y': 2,
+        '3Y': 3,
+        '5Y': 5,
+        '7Y': 7,
+        '10Y': 10,
+        '20Y': 20,
+        '30Y': 30
+    }
+
+    def __init__(self):
+        self.data: pd.DataFrame = pd.DataFrame()
+        self.start_date = datetime(2000, 1, 1)
+        
+    def fetch_yields(self, start_date: Optional[datetime] = None) -> pd.DataFrame:
+        if start_date is None:
+            start_date = self.start_date
+            
+        logger.info(f"Fetching Treasury yield data from {start_date}")
+        
+        df_list = []
+        
+        for maturity, series_id in self.TREASURY_SERIES.items():
+            try:
+                df = web.DataReader(series_id, 'fred', start_date)
+                df.columns = [maturity]
+                df_list.append(df)
+                logger.info(f"Successfully fetched data for {maturity} maturity")
+            except Exception as e:
+                logger.error(f"Error fetching data for {maturity}: {str(e)}")
+                continue
+        
+        if df_list:
+            all_yields = pd.concat(df_list, axis=1)
+            all_yields = all_yields.sort_index()
+            self.data = all_yields
+            return all_yields
+        else:
+            raise ValueError("No data could be fetched")
+
+    def calculate_forward_rate(self, start_tenor: str, end_tenor: str) -> pd.Series:
+        if start_tenor not in self.MATURITY_YEARS or end_tenor not in self.MATURITY_YEARS:
+            raise ValueError("Invalid tenor specified")
+            
+        t1 = self.MATURITY_YEARS[start_tenor]
+        t2 = self.MATURITY_YEARS[end_tenor]
+        
+        r1 = self.data[start_tenor] / 100
+        r2 = self.data[end_tenor] / 100
+        
+        forward_rate = (((1 + r2*t2)/(1 + r1*t1))**(1/(t2-t1)) - 1) * 100
+        
+        return forward_rate
+
+    def calculate_forward_rates(self) -> pd.DataFrame:
+        forwards = pd.DataFrame(index=self.data.index)
+        forwards['1y1y'] = self.calculate_forward_rate('1Y', '2Y')
+        forwards['2y1y'] = self.calculate_forward_rate('2Y', '3Y')
+        forwards['5y5y'] = self.calculate_forward_rate('5Y', '10Y')
+        return forwards
+
+    def plot_forward_rates(self):
+        forwards = self.calculate_forward_rates()
+        
+        fig = go.Figure()
+        
+        for col in forwards.columns:
+            fig.add_trace(go.Scatter(
+                x=forwards.index,
+                y=forwards[col],
+                name=f'{col} forward rate',
+                mode='lines',
+                hovertemplate='Date: %{x}<br>Rate: %{y:.2f}%'
+            ))
+            
+        fig.update_layout(
+            title='Historical Forward Rates',
+            xaxis_title='Date',
+            yaxis_title='Forward Rate (%)',
+            hovermode='x unified',
+            width=1200,
+            height=700
+        )
+        
+        return fig
+
+    def calculate_spreads(self) -> pd.DataFrame:
+        if self.data.empty:
+            raise ValueError("No data available. Fetch data first.")
+            
+        spreads = pd.DataFrame(index=self.data.index)
+        spreads['2s10s'] = self.data['10Y'] - self.data['2Y']
+        spreads['3m10y'] = self.data['10Y'] - self.data['3M']
+        spreads['5s30s'] = self.data['30Y'] - self.data['5Y']
+        
+        return spreads
+
+    def _calculate_spreads(self, data: pd.DataFrame) -> pd.DataFrame:
+        spreads = pd.DataFrame(index=data.index)
+        spreads['2s10s'] = data['10Y'] - data['2Y']
+        spreads['3m10y'] = data['10Y'] - data['3M']
+        spreads['5s30s'] = data['30Y'] - data['5Y']
+        return spreads
+
+    def calculate_historical_moves(self, lookback_days=252):
+        """Calculate historical daily changes to inform stress scenarios"""
+        historical_changes = {}
+        for tenor in ['2Y', '10Y']:
+            changes = self.data[tenor].diff().dropna()
+            historical_changes[tenor] = {
+                'max': changes.max(),
+                'min': changes.min(),
+                '95_ptile': changes.quantile(0.95),
+                '05_ptile': changes.quantile(0.05),
+                'vol': changes.std()
+            }
+        return historical_changes
+
+    def stress_test_yields(self, lookback_days=252):
+        historical_moves = self.calculate_historical_moves(lookback_days)
+        
+        # Create scenarios based on historical moves
+        scenarios = {
+            'Historical_Max_Stress': {
+                '2Y': historical_moves['2Y']['max'],
+                '10Y': historical_moves['10Y']['min']  # Maximum flattener
+            },
+            'Historical_95_Stress': {
+                '2Y': historical_moves['2Y']['95_ptile'],
+                '10Y': historical_moves['10Y']['05_ptile']
+            },
+            'Vol_Based_Stress': {
+                '2Y': 2 * historical_moves['2Y']['vol'],
+                '10Y': -2 * historical_moves['10Y']['vol']
+            },
+            'Crisis_Scenario': {
+                '2Y': 3 * historical_moves['2Y']['vol'],
+                '10Y': -3 * historical_moves['10Y']['vol']
+            }
+        }
+        
+        results = pd.DataFrame(index=scenarios.keys(), 
+                            columns=['Original_Spread', 'Shocked_Spread', 'Delta'])
+        
+        base_spreads = self.calculate_spreads().iloc[-1]
+        
+        for scenario_name, shocks in scenarios.items():
+            shocked_data = self.data.copy()
+            for tenor, shock_bps in shocks.items():
+                shocked_data[tenor] = shocked_data[tenor] + shock_bps
+                
+            shocked_spreads = self._calculate_spreads(shocked_data).iloc[-1]
+            
+            results.loc[scenario_name, 'Original_Spread'] = base_spreads['2s10s']
+            results.loc[scenario_name, 'Shocked_Spread'] = shocked_spreads['2s10s']
+            results.loc[scenario_name, 'Delta'] = shocked_spreads['2s10s'] - base_spreads['2s10s']
+        
+        return results
+
+    def plot_stress_test_results(self, stress_results: pd.DataFrame):
+        fig = go.Figure()
+        
+        fig.add_trace(go.Bar(
+            name='Original Spread',
+            x=stress_results.index,
+            y=stress_results['Original_Spread'],
+            marker_color='blue'
+        ))
+        
+        fig.add_trace(go.Bar(
+            name='Shocked Spread',
+            x=stress_results.index,
+            y=stress_results['Shocked_Spread'],
+            marker_color='red'
+        ))
+        
+        fig.update_layout(
+            barmode='group',
+            title='Stress Test Results: Impact on 2s10s Spread',
+            xaxis_title='Scenario',
+            yaxis_title='Spread (%)',
+            width=1000,
+            height=600
+        )
+        
+        return fig
+
+    def plot_yield_curve(self, date: Optional[datetime] = None):
+        if self.data.empty:
+            raise ValueError("No data available. Fetch data first.")
+            
+        if date is None:
+            yields = self.data.iloc[-1]
+        else:
+            yields = self.data.loc[date]
+            
+        maturities = []
+        for mat in yields.index:
+            if 'M' in mat:
+                maturities.append(float(mat.replace('M', '')) / 12)
+            else:
+                maturities.append(float(mat.replace('Y', '')))
+                
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=maturities,
+            y=yields.values,
+            mode='lines+markers+text',
+            text=[f'{y:.2f}%' for y in yields.values],
+            textposition='top center',
+            hovertemplate='Maturity: %{x:.2f} years<br>Yield: %{y:.2f}%'
+        ))
+        
+        fig.update_layout(
+            title=f'US Treasury Yield Curve ({yields.name.strftime("%Y-%m-%d")})',
+            xaxis_title='Years to Maturity',
+            yaxis_title='Yield (%)',
+            hovermode='x unified',
+            width=1000,
+            height=600,
+            showlegend=False
+        )
+        
+        return fig
+
+    def plot_historical_yields(self, start_year: int = 2015):
+        if self.data.empty:
+            raise ValueError("No data available. Fetch data first.")
+            
+        selected_maturities = ['1M', '6M', '1Y', '3Y', '10Y', '30Y']
+        plot_data = self.data[selected_maturities][self.data.index.year >= start_year]
+        
+        fig = go.Figure()
+        
+        colors = [
+            '#FFE699',  # light yellow (1M)
+            '#FFB366',  # orange (6M)
+            '#FF6B6B',  # coral red (1Y)
+            '#33CC33',  # medium green (3Y)
+            '#3399FF',  # medium blue (10Y)
+            '#9933FF'   # purple (30Y)
+        ]
+        
+        for col, color in zip(plot_data.columns, colors):
+            fig.add_trace(go.Scatter(
+                x=plot_data.index,
+                y=plot_data[col],
+                name=col,
+                mode='lines',
+                line=dict(color=color, width=2),
+                hovertemplate='Date: %{x}<br>Yield: %{y:.2f}%'
+            ))
+                
+        fig.update_layout(
+            title=f'Treasury Yields ({start_year}-Present)',
+            xaxis_title='Date',
+            yaxis_title='Yield (%)',
+            hovermode='x unified',
+            width=1200,
+            height=700,
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=1.05
+            )
+        )
+        
+        return fig
+
+if __name__ == "__main__":
+    analyzer = USYieldCurveAnalyzer()
+    
+    try:
+        yields_data = analyzer.fetch_yields(start_date=datetime(2015, 1, 1))
+        
+        yield_curve = analyzer.plot_yield_curve()
+        yield_curve.show()
+        
+        historical = analyzer.plot_historical_yields(start_year=2015)
+        historical.show()
+        
+        forward_rates = analyzer.calculate_forward_rates()
+        print("\nLatest Forward Rates:")
+        print(forward_rates.tail(1))
+        
+        forward_plot = analyzer.plot_forward_rates()
+        forward_plot.show()
+        
+        stress_results = analyzer.stress_test_yields()
+        print("\nStress Test Results:")
+        print(stress_results)
+        
+        stress_plot = analyzer.plot_stress_test_results(stress_results)
+        stress_plot.show()
+        
+    except Exception as e:
+        logger.error(f"Error in main execution: {str(e)}")
