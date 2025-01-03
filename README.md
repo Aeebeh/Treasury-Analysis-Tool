@@ -1,6 +1,6 @@
 # US Treasury Yield Curve Analysis
 
-A Python package for analyzing US Treasury yield curves, calculating forward rates, and performing stress testing. This tool provides functionality to fetch real-time Treasury data, visualize yield curves, calculate forward rates, and conduct stress testing scenarios.
+A Python tool for analyzing US Treasury yield curves, calculating forward rates, and performing stress testing. This tool provides functionality to fetch real-time Treasury data, visualize yield curves, calculate forward rates, and conduct stress testing scenarios.
 
 ## Features
 
