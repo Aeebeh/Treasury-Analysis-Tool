@@ -7,13 +7,16 @@ from plotly.subplots import make_subplots
 from typing import Dict, List, Tuple, Optional
 import logging
 
+# Set up logging to track execution and potential issues
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class USYieldCurveAnalyzer:
+    # Dictionary mapping common tenor names to FRED (Federal Reserve Economic Data) series IDs
+    # These IDs are used to fetch the corresponding yield data from the Federal Reserve
     TREASURY_SERIES = {
         '1M': 'DGS1MO',
-        '3M': 'DGS3MO', 
+        '3M': 'DGS3MO',
         '6M': 'DGS6MO',
         '1Y': 'DGS1',
         '2Y': 'DGS2',
@@ -25,6 +28,7 @@ class USYieldCurveAnalyzer:
         '30Y': 'DGS30'
     }
 
+    # Convert tenor labels to actual year values for forward rate calculations
     MATURITY_YEARS = {
         '1M': 1/12,
         '3M': 3/12,
@@ -41,16 +45,18 @@ class USYieldCurveAnalyzer:
 
     def __init__(self):
         self.data: pd.DataFrame = pd.DataFrame()
-        self.start_date = datetime(2000, 1, 1)
-        
+        self.start_date = datetime(2000, 1, 1)  # Default start date for historical data
+
     def fetch_yields(self, start_date: Optional[datetime] = None) -> pd.DataFrame:
+        # Fetches Treasury yield data from FRED for all available tenors
         if start_date is None:
             start_date = self.start_date
-            
+
         logger.info(f"Fetching Treasury yield data from {start_date}")
-        
+
         df_list = []
-        
+
+        # Fetch data for each tenor separately and combine them
         for maturity, series_id in self.TREASURY_SERIES.items():
             try:
                 df = web.DataReader(series_id, 'fred', start_date)
@@ -60,7 +66,7 @@ class USYieldCurveAnalyzer:
             except Exception as e:
                 logger.error(f"Error fetching data for {maturity}: {str(e)}")
                 continue
-        
+
         if df_list:
             all_yields = pd.concat(df_list, axis=1)
             all_yields = all_yields.sort_index()
@@ -70,20 +76,25 @@ class USYieldCurveAnalyzer:
             raise ValueError("No data could be fetched")
 
     def calculate_forward_rate(self, start_tenor: str, end_tenor: str) -> pd.Series:
+        # Calculates implied forward rate between two tenors using the formula:
+        # f = ((1 + r2*t2)/(1 + r1*t1))^(1/(t2-t1)) - 1
         if start_tenor not in self.MATURITY_YEARS or end_tenor not in self.MATURITY_YEARS:
             raise ValueError("Invalid tenor specified")
-            
+
         t1 = self.MATURITY_YEARS[start_tenor]
         t2 = self.MATURITY_YEARS[end_tenor]
-        
-        r1 = self.data[start_tenor] / 100
+
+        r1 = self.data[start_tenor] / 100  # Convert from percentage to decimal
         r2 = self.data[end_tenor] / 100
-        
+
         forward_rate = (((1 + r2*t2)/(1 + r1*t1))**(1/(t2-t1)) - 1) * 100
-        
         return forward_rate
 
     def calculate_forward_rates(self) -> pd.DataFrame:
+        # Calculates common forward rate combinations:
+        # 1y1y: 1-year rate, 1 year forward
+        # 2y1y: 1-year rate, 2 years forward
+        # 5y5y: 5-year rate, 5 years forward (important for monetary policy analysis)
         forwards = pd.DataFrame(index=self.data.index)
         forwards['1y1y'] = self.calculate_forward_rate('1Y', '2Y')
         forwards['2y1y'] = self.calculate_forward_rate('2Y', '3Y')
@@ -91,10 +102,11 @@ class USYieldCurveAnalyzer:
         return forwards
 
     def plot_forward_rates(self):
+        # Creates interactive plot of historical forward rates
         forwards = self.calculate_forward_rates()
-        
+
         fig = go.Figure()
-        
+
         for col in forwards.columns:
             fig.add_trace(go.Scatter(
                 x=forwards.index,
@@ -103,7 +115,7 @@ class USYieldCurveAnalyzer:
                 mode='lines',
                 hovertemplate='Date: %{x}<br>Rate: %{y:.2f}%'
             ))
-            
+
         fig.update_layout(
             title='Historical Forward Rates',
             xaxis_title='Date',
@@ -112,21 +124,26 @@ class USYieldCurveAnalyzer:
             width=1200,
             height=700
         )
-        
+
         return fig
 
     def calculate_spreads(self) -> pd.DataFrame:
+        # Calculates key yield curve spreads:
+        # - 2s10s: Classic recession indicator
+        # - 3m10y: Fed's preferred recession indicator
+        # - 5s30s: Long-end steepness indicator
         if self.data.empty:
             raise ValueError("No data available. Fetch data first.")
-            
+
         spreads = pd.DataFrame(index=self.data.index)
         spreads['2s10s'] = self.data['10Y'] - self.data['2Y']
         spreads['3m10y'] = self.data['10Y'] - self.data['3M']
         spreads['5s30s'] = self.data['30Y'] - self.data['5Y']
-        
+
         return spreads
 
     def _calculate_spreads(self, data: pd.DataFrame) -> pd.DataFrame:
+        # Internal helper method for stress testing calculations
         spreads = pd.DataFrame(index=data.index)
         spreads['2s10s'] = data['10Y'] - data['2Y']
         spreads['3m10y'] = data['10Y'] - data['3M']
@@ -134,7 +151,8 @@ class USYieldCurveAnalyzer:
         return spreads
 
     def calculate_historical_moves(self, lookback_days=252):
-        """Calculate historical daily changes to inform stress scenarios"""
+        # Analyzes historical yield changes to inform stress testing
+        # Uses 252 trading days (1 year) by default
         historical_changes = {}
         for tenor in ['2Y', '10Y']:
             changes = self.data[tenor].diff().dropna()
@@ -148,9 +166,14 @@ class USYieldCurveAnalyzer:
         return historical_changes
 
     def stress_test_yields(self, lookback_days=252):
+        # Performs stress testing using different scenarios:
+        # - Historical maximum stress
+        # - 95th percentile stress
+        # - Volatility-based stress
+        # - Crisis scenario
         historical_moves = self.calculate_historical_moves(lookback_days)
-        
-        # Create scenarios based on historical moves
+
+        # Define stress scenarios based on historical moves
         scenarios = {
             'Historical_Max_Stress': {
                 '2Y': historical_moves['2Y']['max'],
@@ -169,42 +192,43 @@ class USYieldCurveAnalyzer:
                 '10Y': -3 * historical_moves['10Y']['vol']
             }
         }
-        
-        results = pd.DataFrame(index=scenarios.keys(), 
+
+        results = pd.DataFrame(index=scenarios.keys(),
                             columns=['Original_Spread', 'Shocked_Spread', 'Delta'])
-        
+
         base_spreads = self.calculate_spreads().iloc[-1]
-        
+
         for scenario_name, shocks in scenarios.items():
             shocked_data = self.data.copy()
             for tenor, shock_bps in shocks.items():
                 shocked_data[tenor] = shocked_data[tenor] + shock_bps
-                
+
             shocked_spreads = self._calculate_spreads(shocked_data).iloc[-1]
-            
+
             results.loc[scenario_name, 'Original_Spread'] = base_spreads['2s10s']
             results.loc[scenario_name, 'Shocked_Spread'] = shocked_spreads['2s10s']
             results.loc[scenario_name, 'Delta'] = shocked_spreads['2s10s'] - base_spreads['2s10s']
-        
+
         return results
 
     def plot_stress_test_results(self, stress_results: pd.DataFrame):
+        # Creates visual comparison of original vs stressed spreads
         fig = go.Figure()
-        
+
         fig.add_trace(go.Bar(
             name='Original Spread',
             x=stress_results.index,
             y=stress_results['Original_Spread'],
             marker_color='blue'
         ))
-        
+
         fig.add_trace(go.Bar(
             name='Shocked Spread',
             x=stress_results.index,
             y=stress_results['Shocked_Spread'],
             marker_color='red'
         ))
-        
+
         fig.update_layout(
             barmode='group',
             title='Stress Test Results: Impact on 2s10s Spread',
@@ -213,25 +237,28 @@ class USYieldCurveAnalyzer:
             width=1000,
             height=600
         )
-        
+
         return fig
 
     def plot_yield_curve(self, date: Optional[datetime] = None):
+        # Creates interactive yield curve plot for a specific date
+        # If no date provided, shows most recent curve
         if self.data.empty:
             raise ValueError("No data available. Fetch data first.")
-            
+
         if date is None:
             yields = self.data.iloc[-1]
         else:
             yields = self.data.loc[date]
-            
+
+        # Convert tenor labels to numerical values for plotting
         maturities = []
         for mat in yields.index:
             if 'M' in mat:
                 maturities.append(float(mat.replace('M', '')) / 12)
             else:
                 maturities.append(float(mat.replace('Y', '')))
-                
+
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=maturities,
@@ -241,7 +268,7 @@ class USYieldCurveAnalyzer:
             textposition='top center',
             hovertemplate='Maturity: %{x:.2f} years<br>Yield: %{y:.2f}%'
         ))
-        
+
         fig.update_layout(
             title=f'US Treasury Yield Curve ({yields.name.strftime("%Y-%m-%d")})',
             xaxis_title='Years to Maturity',
@@ -251,18 +278,22 @@ class USYieldCurveAnalyzer:
             height=600,
             showlegend=False
         )
-        
+
         return fig
 
     def plot_historical_yields(self, start_year: int = 2015):
+        # Creates interactive plot of historical yields across different tenors
+        # Uses color scheme to distinguish between short and long-term rates
         if self.data.empty:
             raise ValueError("No data available. Fetch data first.")
-            
+
+        # Select key tenors to avoid overcrowding the plot
         selected_maturities = ['1M', '6M', '1Y', '3Y', '10Y', '30Y']
         plot_data = self.data[selected_maturities][self.data.index.year >= start_year]
-        
+
         fig = go.Figure()
-        
+
+        # Color scheme progressing from yellow (short-term) to purple (long-term)
         colors = [
             '#FFE699',  # light yellow (1M)
             '#FFB366',  # orange (6M)
@@ -271,7 +302,7 @@ class USYieldCurveAnalyzer:
             '#3399FF',  # medium blue (10Y)
             '#9933FF'   # purple (30Y)
         ]
-        
+
         for col, color in zip(plot_data.columns, colors):
             fig.add_trace(go.Scatter(
                 x=plot_data.index,
@@ -281,7 +312,7 @@ class USYieldCurveAnalyzer:
                 line=dict(color=color, width=2),
                 hovertemplate='Date: %{x}<br>Yield: %{y:.2f}%'
             ))
-                
+
         fig.update_layout(
             title=f'Treasury Yields ({start_year}-Present)',
             xaxis_title='Date',
@@ -296,34 +327,40 @@ class USYieldCurveAnalyzer:
                 x=1.05
             )
         )
-        
+
         return fig
 
 if __name__ == "__main__":
     analyzer = USYieldCurveAnalyzer()
-    
+
     try:
+        # Fetch data and create visualizations
         yields_data = analyzer.fetch_yields(start_date=datetime(2015, 1, 1))
-        
+
+        # Plot current yield curve
         yield_curve = analyzer.plot_yield_curve()
         yield_curve.show()
-        
+
+        # Plot historical yields
         historical = analyzer.plot_historical_yields(start_year=2015)
         historical.show()
-        
+
+        # Calculate and display forward rates
         forward_rates = analyzer.calculate_forward_rates()
         print("\nLatest Forward Rates:")
         print(forward_rates.tail(1))
-        
+
+        # Plot forward rates
         forward_plot = analyzer.plot_forward_rates()
         forward_plot.show()
-        
+
+        # Perform and visualize stress tests
         stress_results = analyzer.stress_test_yields()
         print("\nStress Test Results:")
         print(stress_results)
-        
+
         stress_plot = analyzer.plot_stress_test_results(stress_results)
         stress_plot.show()
-        
+
     except Exception as e:
         logger.error(f"Error in main execution: {str(e)}")
