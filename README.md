@@ -14,7 +14,7 @@ A Python tool for analyzing US Treasury yield curves, calculating forward rates,
 ## Installation
 
 # Clone the repository
-git clone https://github.com/yourusername/treasury-yield-analysis.git
+git clone https://github.com/Aeebeh/treasury-analysis-tool.git
 cd treasury-yield-analysis
 
 # Install dependencies
